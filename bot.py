@@ -42,9 +42,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     except Exception:
-        await update.message.reply_text(
-            "⚠️ Хатогӣ ҳангоми пайвастшавӣ ба система."
-        )
+        except Exception as e:
+    print("SUPABASE ERROR:", repr(e), flush=True)
+
+    await update.message.reply_text(
+        "⚠️ Хатогӣ ҳангоми пайвастшавӣ ба система."
+    )
 
 
 async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
