@@ -1,26 +1,51 @@
-import os 
+import os
+import html
 import logging
-import asyncio
+from datetime import datetime
 
-import uvicorn
-from starlette.applications import Starlette
-from starlette.requests import Request
-from starlette.responses import PlainTextResponse, Response
-from starlette.routing import Route
+from supabase import create_client, Client
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    ReplyKeyboardMarkup,
+)
 from telegram.ext import (
     Application,
     CommandHandler,
     CallbackQueryHandler,
+    MessageHandler,
     ContextTypes,
+    filters,
 )
 
-from supabase import create_client, Client
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import PlainTextResponse
+import uvicorn
 
 
 # =========================================================
-# НАСТРОЙКИ
+# SETTINGS
+# =========================================================
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+
+ADMIN_ID = int(os.getenv("ADMIN_ID", "7321949962"))
+
+PORT = int(os.getenv("PORT", "10000"))
+
+WEBHOOK_URL = os.getenv(
+    "WEBHOOK_URL",
+    "https://maydonisabz-bot.onrender.com/telegram"
+)
+
+
+# =========================================================
+# LOGGING
 # =========================================================
 
 logging.basicConfig(
@@ -30,39 +55,19 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-BOT_TOKEN = os.environ["BOT_TOKEN"]
 
-SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
+# =========================================================
+# CHECK SETTINGS
+# =========================================================
 
-SUPABASE_SERVICE_ROLE_KEY = os.environ[
-    "SUPABASE_SERVICE_ROLE_KEY"
-]
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN is not set")
 
-ADMIN_ID = int(
-    os.environ.get(
-        "ADMIN_ID",
-        "7321949962"
-    )
-)
+if not SUPABASE_URL:
+    raise RuntimeError("SUPABASE_URL is not set")
 
-PORT = int(
-    os.environ.get(
-        "PORT",
-        "10000"
-    )
-)
-
-RENDER_EXTERNAL_URL = os.environ.get(
-    "RENDER_EXTERNAL_URL",
-    "https://maydonisabz-bot.onrender.com"
-).rstrip("/")
-
-WEBHOOK_PATH = "/telegram"
-
-WEBHOOK_URL = (
-    RENDER_EXTERNAL_URL
-    + WEBHOOK_PATH
-)
+if not SUPABASE_SERVICE_ROLE_KEY:
+    raise RuntimeError("SUPABASE_SERVICE_ROLE_KEY is not set")
 
 
 # =========================================================
@@ -76,7 +81,7 @@ supabase: Client = create_client(
 
 
 # =========================================================
-# TELEGRAM
+# TELEGRAM APPLICATION
 # =========================================================
 
 application = (
@@ -88,42 +93,67 @@ application = (
 
 
 # =========================================================
-# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# TEMPORARY ADMIN STATES
 # =========================================================
 
-def safe(value, default="—"):
-    if value is None or value == "":
-        return default
-
-    return str(value)
+# Здесь храним состояние добавления матча.
+# Это нормально для текущей версии.
+add_match_state = {}
 
 
-def is_admin(update: Update):
-    user = update.effective_user
+# =========================================================
+# HELPERS
+# =========================================================
 
-    return bool(
-        user
-        and user.id == ADMIN_ID
+def is_admin(user_id: int) -> bool:
+    return user_id == ADMIN_ID
+
+
+def admin_keyboard():
+    keyboard = [
+        [
+            KeyboardButton("➕ Добавить матч"),
+            KeyboardButton("📋 Матчи"),
+        ],
+        [
+            KeyboardButton("🎯 Пешгӯиҳои нав"),
+            KeyboardButton("👥 Истифодабарандагон"),
+        ],
+        [
+            KeyboardButton("🏆 Рейтинг"),
+            KeyboardButton("🔄 Навсозӣ"),
+        ],
+    ]
+
+    return ReplyKeyboardMarkup(
+        keyboard,
+        resize_keyboard=True
     )
 
 
-async def deny(update: Update):
+def cancel_keyboard():
+    keyboard = [
+        [KeyboardButton("❌ Отмена")]
+    ]
 
-    if update.effective_message:
+    return ReplyKeyboardMarkup(
+        keyboard,
+        resize_keyboard=True
+    )
 
-        await update.effective_message.reply_text(
-            "⛔ Доступ танҳо барои администратор аст."
-        )
+
+def escape(text):
+    if text is None:
+        return ""
+
+    return html.escape(str(text))
 
 
 # =========================================================
 # /START
 # =========================================================
 
-async def start(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user = update.effective_user
 
@@ -132,31 +162,56 @@ async def start(
 
     try:
 
-        supabase.table(
-            "users"
-        ).upsert(
-            {
+        existing = (
+            supabase
+            .table("users")
+            .select("*")
+            .eq("telegram_id", user.id)
+            .execute()
+        )
+
+        if not existing.data:
+
+            supabase.table("users").insert({
                 "telegram_id": user.id,
                 "username": user.username,
-                "first_name": user.first_name or "",
-            },
-            on_conflict="telegram_id"
-        ).execute()
+                "first_name": user.first_name,
+                "points": 0,
+            }).execute()
+
+        else:
+
+            supabase.table("users").update({
+                "username": user.username,
+                "first_name": user.first_name,
+            }).eq(
+                "telegram_id",
+                user.id
+            ).execute()
+
+        if is_admin(user.id):
+
+            await update.message.reply_text(
+                "👑 <b>МАЙДОНИ САБЗ</b>\n\n"
+                "Панели администратор фаъол аст.",
+                parse_mode="HTML",
+                reply_markup=admin_keyboard()
+            )
+
+        else:
+
+            await update.message.reply_text(
+                "⚽️ <b>Хуш омадед ба МАЙДОНИ САБЗ!</b>\n\n"
+                "Пешгӯиҳои худро дар сомона фиристед.",
+                parse_mode="HTML"
+            )
+
+    except Exception as e:
+
+        logger.exception("START ERROR")
 
         await update.message.reply_text(
-            f"👋 Салом, {user.first_name}!\n\n"
-            "⚽ Хуш омадед ба «МАЙДОНИ САБЗ»!\n\n"
-            "Барои пешгӯиҳо аз веб-сайт истифода баред."
-        )
-
-    except Exception:
-
-        logger.exception(
-            "START ERROR"
-        )
-
-        await update.message.reply_text(
-            "⚠️ Хатогӣ ҳангоми пайвастшавӣ ба система."
+            "❌ Хатогӣ ҳангоми бақайдгирӣ."
         )
 
 
@@ -164,7 +219,925 @@ async def start(
 # /MYID
 # =========================================================
 
-async def myid(
+async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    user = update.effective_user
+
+    if not user:
+        return
+
+    await update.message.reply_text(
+        f"🆔 Telegram ID: <code>{user.id}</code>",
+        parse_mode="HTML"
+    )
+
+
+# =========================================================
+# /HEALTH
+# =========================================================
+
+async def health(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    await update.message.reply_text(
+        "✅ Бот фаъол аст.\n"
+        "🗄 Supabase: подключён\n"
+        "🌐 Webhook: активен"
+    )
+
+
+# =========================================================
+# /ADMIN
+# =========================================================
+
+async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    user = update.effective_user
+
+    if not user or not is_admin(user.id):
+
+        await update.message.reply_text(
+            "⛔ Доступ запрещён."
+        )
+        return
+
+    await update.message.reply_text(
+        "👑 <b>АДМИН-ПАНЕЛЬ</b>\n\n"
+        "Интихоб кунед:",
+        parse_mode="HTML",
+        reply_markup=admin_keyboard()
+    )
+
+
+# =========================================================
+# ADD MATCH
+# =========================================================
+
+async def start_add_match(update: Update):
+
+    user = update.effective_user
+
+    if not user or not is_admin(user.id):
+        return
+
+    add_match_state[user.id] = {
+        "step": "home_team"
+    }
+
+    await update.message.reply_text(
+        "➕ <b>ИЛОВА КАРДАНИ МАТЧ</b>\n\n"
+        "🏠 Номи дастаи соҳибхонаро нависед:\n\n"
+        "Мисол:\n"
+        "<code>Манчестер Сити</code>",
+        parse_mode="HTML",
+        reply_markup=cancel_keyboard()
+    )
+
+
+# =========================================================
+# ADD MATCH PROCESS
+# =========================================================
+
+async def process_add_match(update: Update):
+
+    user = update.effective_user
+
+    if not user or not is_admin(user.id):
+        return False
+
+    if user.id not in add_match_state:
+        return False
+
+    text = update.message.text.strip()
+
+    if text == "❌ Отмена":
+
+        add_match_state.pop(user.id, None)
+
+        await update.message.reply_text(
+            "❌ Илова кардани матч бекор шуд.",
+            reply_markup=admin_keyboard()
+        )
+
+        return True
+
+    state = add_match_state[user.id]
+    step = state["step"]
+
+    # ---------------------------------------------
+    # HOME TEAM
+    # ---------------------------------------------
+
+    if step == "home_team":
+
+        state["home_team"] = text
+        state["step"] = "away_team"
+
+        await update.message.reply_text(
+            "✈️ <b>Дастаи меҳмонро нависед:</b>\n\n"
+            "Мисол:\n"
+            "<code>Арсенал</code>",
+            parse_mode="HTML",
+            reply_markup=cancel_keyboard()
+        )
+
+        return True
+
+    # ---------------------------------------------
+    # AWAY TEAM
+    # ---------------------------------------------
+
+    if step == "away_team":
+
+        state["away_team"] = text
+        state["step"] = "date"
+
+        await update.message.reply_text(
+            "📅 <b>Санаи матчро нависед:</b>\n\n"
+            "Формат:\n"
+            "<code>2026-09-21</code>",
+            parse_mode="HTML",
+            reply_markup=cancel_keyboard()
+        )
+
+        return True
+
+    # ---------------------------------------------
+    # DATE
+    # ---------------------------------------------
+
+    if step == "date":
+
+        try:
+
+            datetime.strptime(text, "%Y-%m-%d")
+
+        except ValueError:
+
+            await update.message.reply_text(
+                "❌ Формати сана нодуруст аст.\n\n"
+                "Намуна:\n"
+                "<code>2026-09-21</code>",
+                parse_mode="HTML",
+                reply_markup=cancel_keyboard()
+            )
+
+            return True
+
+        state["match_date"] = text
+        state["step"] = "time"
+
+        await update.message.reply_text(
+            "⏰ <b>Вақти матчро нависед:</b>\n\n"
+            "Вақтро бо вақти Душанбе нависед.\n\n"
+            "Формат:\n"
+            "<code>23:00</code>",
+            parse_mode="HTML",
+            reply_markup=cancel_keyboard()
+        )
+
+        return True
+
+    # ---------------------------------------------
+    # TIME
+    # ---------------------------------------------
+
+    if step == "time":
+
+        try:
+
+            datetime.strptime(text, "%H:%M")
+
+        except ValueError:
+
+            await update.message.reply_text(
+                "❌ Формати вақт нодуруст аст.\n\n"
+                "Намуна:\n"
+                "<code>23:00</code>",
+                parse_mode="HTML",
+                reply_markup=cancel_keyboard()
+            )
+
+            return True
+
+        state["match_time"] = text
+        state["step"] = "competition"
+
+        await update.message.reply_text(
+            "🏆 <b>Номи мусобиқаро нависед:</b>\n\n"
+            "Мисол:\n"
+            "<code>Премер Лига</code>",
+            parse_mode="HTML",
+            reply_markup=cancel_keyboard()
+        )
+
+        return True
+
+    # ---------------------------------------------
+    # COMPETITION
+    # ---------------------------------------------
+
+    if step == "competition":
+
+        state["competition"] = text
+
+        try:
+
+            external_id = (
+                f"{state['match_date']}_"
+                f"{state['match_time']}_"
+                f"{state['home_team']}_"
+                f"{state['away_team']}"
+            )
+
+            result = (
+                supabase
+                .table("matches")
+                .insert({
+                    "external_id": external_id,
+                    "home_team": state["home_team"],
+                    "away_team": state["away_team"],
+                    "match_date": state["match_date"],
+                    "match_time": state["match_time"],
+                    "competition": state["competition"],
+                    "status": "upcoming",
+                    "home_score": None,
+                    "away_score": None,
+                })
+                .execute()
+            )
+
+            match = result.data[0] if result.data else None
+
+            add_match_state.pop(user.id, None)
+
+            if match:
+
+                await update.message.reply_text(
+                    "✅ <b>МАТЧ ИЛОВА ШУД!</b>\n\n"
+                    f"🏠 {escape(state['home_team'])}\n"
+                    f"✈️ {escape(state['away_team'])}\n\n"
+                    f"📅 {state['match_date']}\n"
+                    f"⏰ {state['match_time']}\n"
+                    f"🏆 {escape(state['competition'])}\n\n"
+                    "🌐 Матч дар Supabase нигоҳ дошта шуд.",
+                    parse_mode="HTML",
+                    reply_markup=admin_keyboard()
+                )
+
+            else:
+
+                await update.message.reply_text(
+                    "⚠️ Матч илова шуд, аммо маълумот баргардонида нашуд.",
+                    reply_markup=admin_keyboard()
+                )
+
+        except Exception as e:
+
+            logger.exception("ADD MATCH ERROR")
+
+            add_match_state.pop(user.id, None)
+
+            await update.message.reply_text(
+                "❌ Ҳангоми илова кардани матч хатогӣ шуд.\n\n"
+                f"<code>{escape(str(e))}</code>",
+                parse_mode="HTML",
+                reply_markup=admin_keyboard()
+            )
+
+        return True
+
+    return True
+
+
+# =========================================================
+# SHOW MATCHES
+# =========================================================
+
+async def show_matches(update: Update):
+
+    user = update.effective_user
+
+    if not user or not is_admin(user.id):
+        return
+
+    try:
+
+        result = (
+            supabase
+            .table("matches")
+            .select("*")
+            .order("match_date", desc=False)
+            .order("match_time", desc=False)
+            .execute()
+        )
+
+        matches = result.data or []
+
+        if not matches:
+
+            await update.message.reply_text(
+                "📋 <b>Матчҳо вуҷуд надоранд.</b>",
+                parse_mode="HTML"
+            )
+
+            return
+
+        text = "📋 <b>МАТЧҲО</b>\n\n"
+
+        for match in matches:
+
+            match_id = match.get("id")
+
+            home = escape(match.get("home_team"))
+            away = escape(match.get("away_team"))
+            date = escape(match.get("match_date"))
+            time = escape(match.get("match_time"))
+            competition = escape(match.get("competition"))
+            status = escape(match.get("status"))
+
+            text += (
+                f"🆔 <code>{match_id}</code>\n"
+                f"🏠 {home}\n"
+                f"✈️ {away}\n"
+                f"📅 {date} | ⏰ {time}\n"
+                f"🏆 {competition}\n"
+                f"📌 {status}\n"
+                "━━━━━━━━━━━━━━\n"
+            )
+
+        await update.message.reply_text(
+            text,
+            parse_mode="HTML"
+        )
+
+    except Exception as e:
+
+        logger.exception("SHOW MATCHES ERROR")
+
+        await update.message.reply_text(
+            "❌ Хатогӣ ҳангоми гирифтани матчҳо."
+        )
+
+
+# =========================================================
+# GET PREDICTION DETAILS
+# =========================================================
+
+async def get_prediction_details(prediction):
+
+    prediction_id = prediction.get("id")
+    user_id = prediction.get("user_id")
+    match_id = prediction.get("match_id")
+
+    user_data = None
+    match_data = None
+
+    try:
+
+        user_result = (
+            supabase
+            .table("users")
+            .select("*")
+            .eq("id", user_id)
+            .limit(1)
+            .execute()
+        )
+
+        if user_result.data:
+            user_data = user_result.data[0]
+
+    except Exception:
+        pass
+
+    try:
+
+        match_result = (
+            supabase
+            .table("matches")
+            .select("*")
+            .eq("id", match_id)
+            .limit(1)
+            .execute()
+        )
+
+        if match_result.data:
+            match_data = match_result.data[0]
+
+    except Exception:
+        pass
+
+    return user_data, match_data
+
+
+# =========================================================
+# SHOW NEW PREDICTIONS
+# =========================================================
+
+async def show_predictions(update: Update):
+
+    user = update.effective_user
+
+    if not user or not is_admin(user.id):
+        return
+
+    try:
+
+        result = (
+            supabase
+            .table("predictions")
+            .select("*")
+            .is_("points", "null")
+            .order("created_at", desc=False)
+            .execute()
+        )
+
+        predictions = result.data or []
+
+        if not predictions:
+
+            await update.message.reply_text(
+                "🎯 Пешгӯӣ ҳоло вуҷуд надоранд."
+            )
+
+            return
+
+        await update.message.reply_text(
+            f"🎯 Пешгӯиҳои нав: <b>{len(predictions)}</b>",
+            parse_mode="HTML"
+        )
+
+        for prediction in predictions:
+
+            user_data, match_data = await get_prediction_details(
+                prediction
+            )
+
+            prediction_id = prediction.get("id")
+
+            if user_data:
+
+                first_name = escape(
+                    user_data.get("first_name") or "Истифодабаранда"
+                )
+
+                username = user_data.get("username")
+
+                if username:
+                    username_text = f"@{escape(username)}"
+                else:
+                    username_text = "username нест"
+
+            else:
+
+                first_name = "Номаълум"
+                username_text = "номаълум"
+
+            if match_data:
+
+                home = escape(match_data.get("home_team"))
+                away = escape(match_data.get("away_team"))
+
+                match_text = (
+                    f"🏠 {home} — ✈️ {away}"
+                )
+
+            else:
+
+                match_text = "Матч ёфт нашуд"
+
+            predicted_home = prediction.get("predicted_home")
+            predicted_away = prediction.get("predicted_away")
+            predicted_scorer = prediction.get("predicted_scorer")
+
+            scorer_text = (
+                escape(predicted_scorer)
+                if predicted_scorer
+                else "—"
+            )
+
+            text = (
+                "🎯 <b>ПЕШГӮӢ</b>\n\n"
+                f"👤 {first_name}\n"
+                f"📱 {username_text}\n\n"
+                f"⚽️ {match_text}\n\n"
+                f"🔮 Пешгӯӣ: "
+                f"<b>{predicted_home} : {predicted_away}</b>\n"
+                f"🥅 Голзан: {scorer_text}\n\n"
+                f"🆔 Prediction ID: <code>{prediction_id}</code>"
+            )
+
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "✅ Дуруст +1",
+                        callback_data=f"correct:{prediction_id}"
+                    ),
+                    InlineKeyboardButton(
+                        "❌ Нодуруст 0",
+                        callback_data=f"wrong:{prediction_id}"
+                    ),
+                ]
+            ])
+
+            await update.message.reply_text(
+                text,
+                parse_mode="HTML",
+                reply_markup=keyboard
+            )
+
+    except Exception as e:
+
+        logger.exception("SHOW PREDICTIONS ERROR")
+
+        await update.message.reply_text(
+            "❌ Хатогӣ ҳангоми гирифтани пешгӯиҳо."
+        )
+
+
+# =========================================================
+# USERS
+# =========================================================
+
+async def show_users(update: Update):
+
+    user = update.effective_user
+
+    if not user or not is_admin(user.id):
+        return
+
+    try:
+
+        result = (
+            supabase
+            .table("users")
+            .select("*")
+            .order("points", desc=True)
+            .execute()
+        )
+
+        users = result.data or []
+
+        if not users:
+
+            await update.message.reply_text(
+                "👥 Истифодабарандагон вуҷуд надоранд."
+            )
+
+            return
+
+        text = "👥 <b>ИСТИФОДАБАРАНДАГОН</b>\n\n"
+
+        for index, item in enumerate(users, start=1):
+
+            first_name = escape(
+                item.get("first_name") or "Номаълум"
+            )
+
+            username = item.get("username")
+
+            if username:
+                username_text = f"@{escape(username)}"
+            else:
+                username_text = "—"
+
+            points = item.get("points") or 0
+
+            text += (
+                f"{index}. {first_name} "
+                f"({username_text}) — "
+                f"<b>{points}</b> хол\n"
+            )
+
+        await update.message.reply_text(
+            text,
+            parse_mode="HTML"
+        )
+
+    except Exception as e:
+
+        logger.exception("SHOW USERS ERROR")
+
+        await update.message.reply_text(
+            "❌ Хатогӣ ҳангоми гирифтани истифодабарандагон."
+        )
+
+
+# =========================================================
+# RATING
+# =========================================================
+
+async def show_rating(update: Update):
+
+    user = update.effective_user
+
+    if not user or not is_admin(user.id):
+        return
+
+    try:
+
+        result = (
+            supabase
+            .table("users")
+            .select("*")
+            .order("points", desc=True)
+            .limit(20)
+            .execute()
+        )
+
+        users = result.data or []
+
+        if not users:
+
+            await update.message.reply_text(
+                "🏆 Рейтинг ҳоло холӣ аст."
+            )
+
+            return
+
+        text = "🏆 <b>РЕЙТИНГ</b>\n\n"
+
+        medals = ["🥇", "🥈", "🥉"]
+
+        for index, item in enumerate(users, start=1):
+
+            first_name = escape(
+                item.get("first_name") or "Номаълум"
+            )
+
+            points = item.get("points") or 0
+
+            if index <= 3:
+                prefix = medals[index - 1]
+            else:
+                prefix = f"{index}."
+
+            text += (
+                f"{prefix} {first_name} — "
+                f"<b>{points}</b> хол\n"
+            )
+
+        await update.message.reply_text(
+            text,
+            parse_mode="HTML"
+        )
+
+    except Exception as e:
+
+        logger.exception("SHOW RATING ERROR")
+
+        await update.message.reply_text(
+            "❌ Хатогӣ ҳангоми гирифтани рейтинг."
+        )
+
+
+# =========================================================
+# AWARD POINTS
+# =========================================================
+
+async def award_points(
+    query,
+    prediction_id: int,
+    correct: bool
+):
+
+    try:
+
+        # Get prediction
+        prediction_result = (
+            supabase
+            .table("predictions")
+            .select("*")
+            .eq("id", prediction_id)
+            .limit(1)
+            .execute()
+        )
+
+        if not prediction_result.data:
+
+            await query.answer(
+                "❌ Пешгӯӣ ёфт нашуд.",
+                show_alert=True
+            )
+
+            return
+
+        prediction = prediction_result.data[0]
+
+        # Already processed
+        if prediction.get("points") is not None:
+
+            await query.answer(
+                "⚠️ Ин пешгӯӣ аллакай коркард шудааст.",
+                show_alert=True
+            )
+
+            return
+
+        user_id = prediction.get("user_id")
+
+        points = 1 if correct else 0
+
+        # Update prediction
+        (
+            supabase
+            .table("predictions")
+            .update({
+                "points": points
+            })
+            .eq("id", prediction_id)
+            .execute()
+        )
+
+        # Add points only when correct
+        if correct:
+
+            user_result = (
+                supabase
+                .table("users")
+                .select("points")
+                .eq("id", user_id)
+                .limit(1)
+                .execute()
+            )
+
+            if user_result.data:
+
+                current_points = (
+                    user_result.data[0].get("points") or 0
+                )
+
+                new_points = current_points + 1
+
+                (
+                    supabase
+                    .table("users")
+                    .update({
+                        "points": new_points
+                    })
+                    .eq("id", user_id)
+                    .execute()
+                )
+
+        # Notify player
+        try:
+
+            telegram_result = (
+                supabase
+                .table("users")
+                .select("telegram_id, first_name")
+                .eq("id", user_id)
+                .limit(1)
+                .execute()
+            )
+
+            if telegram_result.data:
+
+                telegram_id = telegram_result.data[0].get(
+                    "telegram_id"
+                )
+
+                if telegram_id:
+
+                    if correct:
+
+                        message = (
+                            "🎉 <b>Пешгӯии шумо дуруст баромад!</b>\n\n"
+                            "✅ Шумо <b>+1 хол</b> гирифтед."
+                        )
+
+                    else:
+
+                        message = (
+                            "📊 <b>Натиҷаи пешгӯӣ</b>\n\n"
+                            "❌ Ин пешгӯӣ дуруст набуд.\n"
+                            "Хол: <b>0</b>"
+                        )
+
+                    await application.bot.send_message(
+                        chat_id=telegram_id,
+                        text=message,
+                        parse_mode="HTML"
+                    )
+
+        except Exception:
+
+            logger.exception(
+                "PLAYER NOTIFICATION ERROR"
+            )
+
+        # Update admin message
+        try:
+
+            old_text = query.message.text or ""
+
+            result_text = (
+                "\n\n"
+                "━━━━━━━━━━━━━━\n"
+                f"{'✅ ДУРУСТ +1' if correct else '❌ НОДУРУСТ 0'}"
+            )
+
+            await query.edit_message_text(
+                old_text + result_text,
+                parse_mode="HTML"
+            )
+
+        except Exception:
+
+            pass
+
+        await query.answer(
+            "✅ Хол сабт шуд."
+        )
+
+    except Exception as e:
+
+        logger.exception("AWARD POINTS ERROR")
+
+        await query.answer(
+            "❌ Хатогӣ.",
+            show_alert=True
+        )
+
+
+# =========================================================
+# CALLBACKS
+# =========================================================
+
+async def callback_handler(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    query = update.callback_query
+
+    if not query:
+        return
+
+    user = query.from_user
+
+    if not is_admin(user.id):
+
+        await query.answer(
+            "⛔ Доступ запрещён.",
+            show_alert=True
+        )
+
+        return
+
+    data = query.data or ""
+
+    if data.startswith("correct:"):
+
+        try:
+
+            prediction_id = int(
+                data.split(":")[1]
+            )
+
+            await award_points(
+                query,
+                prediction_id,
+                True
+            )
+
+        except Exception:
+
+            await query.answer(
+                "❌ Хатогӣ.",
+                show_alert=True
+            )
+
+        return
+
+    if data.startswith("wrong:"):
+
+        try:
+
+            prediction_id = int(
+                data.split(":")[1]
+            )
+
+            await award_points(
+                query,
+                prediction_id,
+                False
+            )
+
+        except Exception:
+
+            await query.answer(
+                "❌ Хатогӣ.",
+                show_alert=True
+            )
+
+        return
+
+
+# =========================================================
+# TEXT HANDLER
+# =========================================================
+
+async def text_handler(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
@@ -174,915 +1147,124 @@ async def myid(
     if not user:
         return
 
-    username = (
-        user.username
-        if user.username
-        else "надорад"
-    )
+    text = (update.message.text or "").strip()
 
-    await update.message.reply_text(
-        f"🆔 Telegram ID: {user.id}\n"
-        f"👤 Ном: {user.first_name}\n"
-        f"🔹 Username: @{username}"
-    )
+    # ---------------------------------------------
+    # ADD MATCH STATE
+    # ---------------------------------------------
 
+    if user.id in add_match_state:
 
-# =========================================================
-# /HEALTH
-# =========================================================
-
-async def health_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    await update.message.reply_text(
-        "✅ MaydoniSabz bot фаъол аст."
-    )
-
-
-# =========================================================
-# АДМИН-МЕНЮ
-# =========================================================
-
-def admin_keyboard():
-
-    return InlineKeyboardMarkup(
-        [
-
-            [
-                InlineKeyboardButton(
-                    "🎯 Пешгӯиҳои нав",
-                    callback_data="admin_predictions"
-                )
-            ],
-
-            [
-                InlineKeyboardButton(
-                    "👥 Истифодабарандагон",
-                    callback_data="admin_users"
-                ),
-
-                InlineKeyboardButton(
-                    "🏆 Рейтинг",
-                    callback_data="admin_rating"
-                )
-            ],
-
-            [
-                InlineKeyboardButton(
-                    "🔄 Навсозӣ",
-                    callback_data="admin_menu"
-                )
-            ]
-
-        ]
-    )
-
-
-async def admin(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    if not is_admin(update):
-
-        await deny(update)
+        await process_add_match(update)
 
         return
 
-    await update.message.reply_text(
+    # ---------------------------------------------
+    # ADMIN ONLY
+    # ---------------------------------------------
 
-        "🛠 <b>АДМИН-ПАНЕЛЬ</b>\n\n"
-        "⚽ МАЙДОНИ САБЗ\n\n"
-        "Аз меню интихоб кунед:",
-
-        parse_mode="HTML",
-
-        reply_markup=admin_keyboard()
-    )
-
-
-# =========================================================
-# ПОЛУЧИТЬ ПОЛЬЗОВАТЕЛЯ И МАТЧ
-# =========================================================
-
-async def get_prediction_details(
-    prediction
-):
-
-    user = None
-    match = None
-
-    user_id = prediction.get(
-        "user_id"
-    )
-
-    match_id = prediction.get(
-        "match_id"
-    )
-
-    if user_id is not None:
-
-        result = (
-            supabase
-            .table("users")
-            .select(
-                "id,telegram_id,"
-                "username,first_name,points"
-            )
-            .eq(
-                "id",
-                user_id
-            )
-            .limit(1)
-            .execute()
-        )
-
-        if result.data:
-
-            user = result.data[0]
-
-    if match_id is not None:
-
-        result = (
-            supabase
-            .table("matches")
-            .select(
-                "id,home_team,away_team,"
-                "match_date,match_time,"
-                "competition,status,"
-                "home_score,away_score"
-            )
-            .eq(
-                "id",
-                match_id
-            )
-            .limit(1)
-            .execute()
-        )
-
-        if result.data:
-
-            match = result.data[0]
-
-    return user, match
-
-
-# =========================================================
-# НОВЫЕ ПРОГНОЗЫ
-# =========================================================
-
-async def show_predictions(
-    query=None,
-    message=None
-):
-
-    result = (
-        supabase
-        .table("predictions")
-        .select(
-            "id,user_id,match_id,"
-            "predicted_home,predicted_away,"
-            "predicted_scorer,points,created_at"
-        )
-        .order(
-            "created_at",
-            desc=True
-        )
-        .limit(50)
-        .execute()
-    )
-
-    predictions = (
-        result.data
-        or []
-    )
-
-    if not predictions:
-
-        text = (
-            "🎯 Пешгӯиҳо ҳоло вуҷуд надоранд."
-        )
-
-        if query:
-
-            await query.edit_message_text(
-                text,
-                reply_markup=admin_keyboard()
-            )
-
-        elif message:
-
-            await message.reply_text(
-                text,
-                reply_markup=admin_keyboard()
-            )
+    if not is_admin(user.id):
 
         return
 
-    pending = [
-        p
-        for p in predictions
-        if p.get("points") is None
-    ]
+    if text == "➕ Добавить матч":
 
-    if not pending:
-
-        text = (
-            "✅ Ҳамаи пешгӯиҳои интизорӣ "
-            "аллакай баррасӣ шудаанд."
-        )
-
-        if query:
-
-            await query.edit_message_text(
-                text,
-                reply_markup=admin_keyboard()
-            )
-
-        elif message:
-
-            await message.reply_text(
-                text,
-                reply_markup=admin_keyboard()
-            )
-
+        await start_add_match(update)
         return
 
-    if query:
+    if text == "📋 Матчи":
 
-        await query.edit_message_text(
-            f"🎯 Пешгӯиҳои нав: {len(pending)}"
-        )
+        await show_matches(update)
+        return
 
-    target = (
-        query.message
-        if query
-        else message
-    )
+    if text == "🎯 Пешгӯиҳои нав":
 
-    for prediction in pending[:20]:
+        await show_predictions(update)
+        return
 
-        user, match = (
-            await get_prediction_details(
-                prediction
-            )
-        )
+    if text == "👥 Истифодабарандагон":
 
-        user_name = safe(
-            (user or {}).get("first_name")
-            or (user or {}).get("username"),
-            "Истифодабаранда"
-        )
+        await show_users(update)
+        return
 
-        telegram_id = safe(
-            (user or {}).get("telegram_id")
-        )
+    if text == "🏆 Рейтинг":
 
-        home = safe(
-            (match or {}).get("home_team"),
-            "Дастаи 1"
-        )
+        await show_rating(update)
+        return
 
-        away = safe(
-            (match or {}).get("away_team"),
-            "Дастаи 2"
-        )
+    if text == "🔄 Навсозӣ":
 
-        predicted_home = safe(
-            prediction.get(
-                "predicted_home"
-            )
-        )
-
-        predicted_away = safe(
-            prediction.get(
-                "predicted_away"
-            )
-        )
-
-        text = (
-
-            "🔔 <b>ПЕШГӮИИ НАВ</b>\n\n"
-
-            f"👤 {user_name}\n"
-
-            f"🆔 {telegram_id}\n\n"
-
-            f"⚽ <b>{home}</b>\n"
-            f"🆚 <b>{away}</b>\n\n"
-
-            f"🎯 Пешгӯӣ: "
-            f"<b>{predicted_home}:"
-            f"{predicted_away}</b>\n\n"
-
-            f"🆔 ID: "
-            f"<code>{prediction['id']}</code>"
-        )
-
-        keyboard = InlineKeyboardMarkup(
-
-            [
-
-                [
-
-                    InlineKeyboardButton(
-                        "✅ Дуруст +1",
-                        callback_data=(
-                            f"award:"
-                            f"{prediction['id']}:1"
-                        )
-                    ),
-
-                    InlineKeyboardButton(
-                        "❌ Нодуруст 0",
-                        callback_data=(
-                            f"award:"
-                            f"{prediction['id']}:0"
-                        )
-                    )
-
-                ]
-
-            ]
-        )
-
-        await target.reply_text(
-
-            text,
-
-            parse_mode="HTML",
-
-            reply_markup=keyboard
-        )
-
-
-# =========================================================
-# ПОЛЬЗОВАТЕЛИ
-# =========================================================
-
-async def show_users(query):
-
-    result = (
-        supabase
-        .table("users")
-        .select(
-            "telegram_id,"
-            "username,"
-            "first_name,"
-            "points"
-        )
-        .order(
-            "points",
-            desc=True
-        )
-        .limit(20)
-        .execute()
-    )
-
-    users = (
-        result.data
-        or []
-    )
-
-    if not users:
-
-        await query.edit_message_text(
-            "👥 Истифодабарандагон ҳоло нестанд.",
+        await update.message.reply_text(
+            "🔄 Маълумот нав карда шуд.",
             reply_markup=admin_keyboard()
         )
 
-        return
-
-    lines = [
-        "👥 <b>ИСТИФОДАБАРАНДАГОН</b>\n"
-    ]
-
-    for index, user in enumerate(
-        users,
-        1
-    ):
-
-        name = safe(
-            user.get("first_name")
-            or user.get("username"),
-            "Без ном"
-        )
-
-        points = (
-            user.get("points")
-            or 0
-        )
-
-        lines.append(
-            f"{index}. {name} — "
-            f"🏆 <b>{points}</b>"
-        )
-
-    await query.edit_message_text(
-
-        "\n".join(lines),
-
-        parse_mode="HTML",
-
-        reply_markup=admin_keyboard()
-    )
-
-
-# =========================================================
-# РЕЙТИНГ
-# =========================================================
-
-async def show_rating(query):
-
-    result = (
-        supabase
-        .table("users")
-        .select(
-            "first_name,"
-            "username,"
-            "points"
-        )
-        .order(
-            "points",
-            desc=True
-        )
-        .limit(20)
-        .execute()
-    )
-
-    users = (
-        result.data
-        or []
-    )
-
-    if not users:
-
-        await query.edit_message_text(
-            "🏆 Рейтинг ҳоло хол надорад.",
-            reply_markup=admin_keyboard()
-        )
+        await show_matches(update)
 
         return
 
-    medals = [
-        "🥇",
-        "🥈",
-        "🥉"
-    ]
-
-    lines = [
-        "🏆 <b>РЕЙТИНГ</b>\n"
-    ]
-
-    for index, user in enumerate(
-        users,
-        1
-    ):
-
-        name = safe(
-            user.get("first_name")
-            or user.get("username"),
-            "Без ном"
-        )
-
-        points = (
-            user.get("points")
-            or 0
-        )
-
-        prefix = (
-            medals[index - 1]
-            if index <= 3
-            else f"{index}."
-        )
-
-        lines.append(
-            f"{prefix} {name} — "
-            f"<b>{points}</b> хол"
-        )
-
-    await query.edit_message_text(
-
-        "\n".join(lines),
-
-        parse_mode="HTML",
-
-        reply_markup=admin_keyboard()
-    )
-
 
 # =========================================================
-# НАЧИСЛЕНИЕ БАЛЛОВ
+# WEBHOOK
 # =========================================================
 
-async def award_points(
-    query,
-    prediction_id,
-    points
-):
-
-    # Получаем прогноз
-    result = (
-        supabase
-        .table("predictions")
-        .select(
-            "id,user_id,points"
-        )
-        .eq(
-            "id",
-            prediction_id
-        )
-        .limit(1)
-        .execute()
-    )
-
-    if not result.data:
-
-        await query.answer(
-            "❌ Пешгӯӣ ёфт нашуд.",
-            show_alert=True
-        )
-
-        return
-
-    prediction = result.data[0]
-
-    # Защита от повторной проверки
-    if prediction.get("points") is not None:
-
-        await query.answer(
-            "⚠️ Ин пешгӯӣ аллакай баррасӣ шудааст.",
-            show_alert=True
-        )
-
-        return
-
-    user_id = prediction.get(
-        "user_id"
-    )
-
-    if user_id is None:
-
-        await query.answer(
-            "❌ user_id нест.",
-            show_alert=True
-        )
-
-        return
-
-    # Получаем пользователя
-    user_result = (
-        supabase
-        .table("users")
-        .select(
-            "id,"
-            "telegram_id,"
-            "first_name,"
-            "username,"
-            "points"
-        )
-        .eq(
-            "id",
-            user_id
-        )
-        .limit(1)
-        .execute()
-    )
-
-    if not user_result.data:
-
-        await query.answer(
-            "❌ Истифодабаранда ёфт нашуд.",
-            show_alert=True
-        )
-
-        return
-
-    user = user_result.data[0]
-
-    old_points = (
-        user.get("points")
-        or 0
-    )
-
-    new_points = (
-        old_points
-        + points
-    )
-
-    # Обновляем очки пользователя
-    supabase.table(
-        "users"
-    ).update(
-        {
-            "points": new_points
-        }
-    ).eq(
-        "id",
-        user_id
-    ).execute()
-
-    # Сохраняем результат прогноза
-    supabase.table(
-        "predictions"
-    ).update(
-        {
-            "points": points
-        }
-    ).eq(
-        "id",
-        prediction_id
-    ).execute()
-
-    await query.answer(
-        "✅ Пешгӯӣ баррасӣ шуд."
-    )
-
-    # Убираем кнопки
-    await query.edit_message_reply_markup(
-        reply_markup=None
-    )
-
-    name = safe(
-        user.get("first_name")
-        or user.get("username"),
-        "Истифодабаранда"
-    )
-
-    if points == 1:
-
-        result_text = (
-            "✅ Дуруст +1"
-        )
-
-    else:
-
-        result_text = (
-            "❌ Нодуруст 0"
-        )
-
-    # Сообщение админу
-    await query.message.reply_text(
-
-        "📋 <b>ПЕШГӮӢ БАРРАСӢ ШУД</b>\n\n"
-
-        f"👤 {name}\n"
-
-        f"📌 Натиҷа: "
-        f"<b>{result_text}</b>\n"
-
-        f"🏆 Ҳоли умумӣ: "
-        f"<b>{new_points}</b>",
-
-        parse_mode="HTML"
-    )
-
-    # Сообщение игроку
-    telegram_id = user.get(
-        "telegram_id"
-    )
-
-    if telegram_id:
-
-        try:
-
-            await application.bot.send_message(
-
-                chat_id=telegram_id,
-
-                text=(
-
-                    "🏆 <b>НАТИҶАИ ПЕШГӮӢ</b>\n\n"
-
-                    f"📌 Натиҷа: "
-                    f"<b>{result_text}</b>\n"
-
-                    f"🏆 Ҳоли умумӣ: "
-                    f"<b>{new_points}</b>"
-                ),
-
-                parse_mode="HTML"
-            )
-
-        except Exception:
-
-            logger.exception(
-                "PLAYER NOTIFICATION ERROR"
-            )
-
-
-# =========================================================
-# CALLBACK-КНОПКИ
-# =========================================================
-
-async def callbacks(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    query = update.callback_query
-
-    if not is_admin(update):
-
-        await query.answer(
-            "⛔ Танҳо администратор.",
-            show_alert=True
-        )
-
-        return
-
-    data = query.data or ""
-
-    try:
-
-        if data == "admin_menu":
-
-            await query.answer()
-
-            await query.edit_message_text(
-
-                "🛠 <b>АДМИН-ПАНЕЛЬ</b>\n\n"
-                "⚽ МАЙДОНИ САБЗ\n\n"
-                "Аз меню интихоб кунед:",
-
-                parse_mode="HTML",
-
-                reply_markup=admin_keyboard()
-            )
-
-            return
-
-        if data == "admin_predictions":
-
-            await query.answer()
-
-            await show_predictions(
-                query=query
-            )
-
-            return
-
-        if data == "admin_users":
-
-            await query.answer()
-
-            await show_users(
-                query
-            )
-
-            return
-
-        if data == "admin_rating":
-
-            await query.answer()
-
-            await show_rating(
-                query
-            )
-
-            return
-
-        if data.startswith("award:"):
-
-            parts = data.split(":")
-
-            if len(parts) != 3:
-
-                await query.answer(
-                    "❌ Нодуруст маълумот.",
-                    show_alert=True
-                )
-
-                return
-
-            prediction_id = int(
-                parts[1]
-            )
-
-            points = int(
-                parts[2]
-            )
-
-            # Разрешаем только 0 или 1
-            if points not in (0, 1):
-
-                await query.answer(
-                    "❌ Нодуруст хол.",
-                    show_alert=True
-                )
-
-                return
-
-            await award_points(
-
-                query,
-
-                prediction_id,
-
-                points
-            )
-
-            return
-
-        await query.answer()
-
-    except Exception:
-
-        logger.exception(
-            "CALLBACK ERROR"
-        )
-
-        await query.answer(
-            "❌ Хатогӣ. Логҳоро санҷед.",
-            show_alert=True
-        )
-
-
-# =========================================================
-# WEBHOOK TELEGRAM
-# =========================================================
-
-async def telegram_webhook(
-    request: Request
-):
+async def telegram_webhook(request: Request):
 
     try:
 
         data = await request.json()
 
-        telegram_update = (
-            Update.de_json(
-                data=data,
-                bot=application.bot
-            )
+        update = Update.de_json(
+            data,
+            application.bot
         )
 
-        await application.update_queue.put(
-            telegram_update
-        )
+        await application.process_update(update)
 
-        return Response(
-            status_code=200
-        )
+        return PlainTextResponse("OK")
 
-    except Exception:
+    except Exception as e:
 
-        logger.exception(
-            "WEBHOOK ERROR"
-        )
+        logger.exception("WEBHOOK ERROR")
 
-        return Response(
-            content="error",
+        return PlainTextResponse(
+            "ERROR",
             status_code=500
         )
 
 
 # =========================================================
-# WEB
+# HEALTH WEB
 # =========================================================
 
-async def root(
-    request: Request
-):
+async def web_health(request: Request):
 
     return PlainTextResponse(
-        "MaydoniSabz Bot"
+        "MaydoniSabz bot is running"
     )
 
 
-async def health(
-    request: Request
-):
-
-    return PlainTextResponse(
-        "MaydoniSabz bot is running!"
-    )
-
+# =========================================================
+# STARLETTE APP
+# =========================================================
 
 web_app = Starlette(
-
     routes=[
-
-        Route(
+        Starlette.route(
             "/",
-            root,
+            web_health,
             methods=["GET"]
         ),
-
-        Route(
+        Starlette.route(
             "/health",
-            health,
+            web_health,
             methods=["GET"]
         ),
-
-        Route(
-            WEBHOOK_PATH,
+        Starlette.route(
+            "/telegram",
             telegram_webhook,
             methods=["POST"]
-        )
-
+        ),
     ]
 )
 
@@ -1091,83 +1273,45 @@ web_app = Starlette(
 # MAIN
 # =========================================================
 
-async def main():
+async def setup_bot():
 
-    application.add_handler(
-        CommandHandler(
-            "start",
-            start
-        )
+    await application.initialize()
+
+    await application.bot.set_webhook(
+        url=WEBHOOK_URL,
+        allowed_updates=Update.ALL_TYPES
     )
 
-    application.add_handler(
-        CommandHandler(
-            "myid",
-            myid
-        )
-    )
-
-    application.add_handler(
-        CommandHandler(
-            "health",
-            health_command
-        )
-    )
-
-    application.add_handler(
-        CommandHandler(
-            "admin",
-            admin
-        )
-    )
-
-    application.add_handler(
-        CallbackQueryHandler(
-            callbacks
-        )
-    )
+    await application.start()
 
     logger.info(
-        "Starting MaydoniSabz bot..."
-    )
-
-    logger.info(
-        "Webhook: %s",
+        "Bot started. Webhook: %s",
         WEBHOOK_URL
     )
 
-    logger.info(
-        "Admin ID: %s",
-        ADMIN_ID
-    )
 
-    async with application:
+async def shutdown_bot():
 
-        await application.bot.set_webhook(
+    await application.stop()
+    await application.shutdown()
 
-            url=WEBHOOK_URL,
 
-            allowed_updates=Update.ALL_TYPES,
+if __name__ == "__main__":
 
-            drop_pending_updates=True
-        )
+    import asyncio
 
-        await application.start()
+    async def runner():
+
+        await setup_bot()
 
         config = uvicorn.Config(
-
             web_app,
-
             host="0.0.0.0",
-
             port=PORT,
-
             log_level="info"
         )
 
-        server = uvicorn.Server(
-            config
-        )
+        server = uvicorn.Server(config)
 
         try:
 
@@ -1175,15 +1319,6 @@ async def main():
 
         finally:
 
-            await application.stop()
+            await shutdown_bot()
 
-
-# =========================================================
-# ЗАПУСК
-# =========================================================
-
-if __name__ == "__main__":
-
-    asyncio.run(
-        main()
-)
+    asyncio.run(runner())
