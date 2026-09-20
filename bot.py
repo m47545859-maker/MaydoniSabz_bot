@@ -1205,7 +1205,25 @@ async def text_handler(
 
         return
 
+# =========================================================
+# HANDLERS
+# =========================================================
 
+application.add_handler(CommandHandler("start", start))
+application.add_handler(CommandHandler("myid", myid))
+application.add_handler(CommandHandler("health", health))
+application.add_handler(CommandHandler("admin", admin))
+
+application.add_handler(
+    CallbackQueryHandler(callback_handler)
+)
+
+application.add_handler(
+    MessageHandler(
+        filters.TEXT & ~filters.COMMAND,
+        text_handler
+    )
+)
 # =========================================================
 # WEBHOOK
 # =========================================================
