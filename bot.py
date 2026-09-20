@@ -24,6 +24,7 @@ from telegram.ext import (
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import PlainTextResponse
+from starlette.routing import Route
 import uvicorn
 
 
@@ -1251,21 +1252,9 @@ async def web_health(request: Request):
 
 web_app = Starlette(
     routes=[
-        Starlette.route(
-            "/",
-            web_health,
-            methods=["GET"]
-        ),
-        Starlette.route(
-            "/health",
-            web_health,
-            methods=["GET"]
-        ),
-        Starlette.route(
-            "/telegram",
-            telegram_webhook,
-            methods=["POST"]
-        ),
+        Route("/", web_health, methods=["GET"]),
+        Route("/health", web_health, methods=["GET"]),
+        Route("/telegram", telegram_webhook, methods=["POST"]),
     ]
 )
 
