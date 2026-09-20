@@ -12,6 +12,7 @@ from telegram import (
     ReplyKeyboardMarkup,
     KeyboardButton,
 )
+
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -25,6 +26,7 @@ from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import PlainTextResponse
 from starlette.routing import Route
+
 import uvicorn
 
 
@@ -95,12 +97,10 @@ application = (
 
 
 # =========================================================
-# TEMPORARY ADMIN STATES
+# STATES
 # =========================================================
 
-# Здесь храним состояние добавления матча.
-# Это нормально для текущей версии.
-add_match_state = {}
+user_states = {}
 
 
 # =========================================================
@@ -111,18 +111,33 @@ def is_admin(user_id: int) -> bool:
     return user_id == ADMIN_ID
 
 
+def escape(text):
+    if text is None:
+        return ""
+
+    return html.escape(str(text))
+
+
+# =========================================================
+# ADMIN KEYBOARD
+# =========================================================
+
 def admin_keyboard():
+
     keyboard = [
         [
             KeyboardButton("➕ Добавить матч"),
             KeyboardButton("📋 Матчи"),
         ],
         [
+            KeyboardButton("🗑 Удалить матч"),
             KeyboardButton("🎯 Пешгӯиҳои нав"),
-            KeyboardButton("👥 Истифодабарандагон"),
         ],
         [
+            KeyboardButton("👥 Истифодабарандагон"),
             KeyboardButton("🏆 Рейтинг"),
+        ],
+        [
             KeyboardButton("🔄 Навсозӣ"),
         ],
     ]
@@ -133,9 +148,16 @@ def admin_keyboard():
     )
 
 
+# =========================================================
+# CANCEL KEYBOARD
+# =========================================================
+
 def cancel_keyboard():
+
     keyboard = [
-        [KeyboardButton("❌ Отмена")]
+        [
+            KeyboardButton("❌ Отмена")
+        ]
     ]
 
     return ReplyKeyboardMarkup(
@@ -144,18 +166,14 @@ def cancel_keyboard():
     )
 
 
-def escape(text):
-    if text is None:
-        return ""
-
-    return html.escape(str(text))
-
-
 # =========================================================
 # /START
 # =========================================================
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     user = update.effective_user
 
@@ -221,7 +239,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # /MYID
 # =========================================================
 
-async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def myid(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     user = update.effective_user
 
@@ -238,7 +259,10 @@ async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # /HEALTH
 # =========================================================
 
-async def health(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def health(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     await update.message.reply_text(
         "✅ Бот фаъол аст.\n"
@@ -251,7 +275,10 @@ async def health(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # /ADMIN
 # =========================================================
 
-async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def admin(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     user = update.effective_user
 
@@ -260,6 +287,7 @@ async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "⛔ Доступ запрещён."
         )
+
         return
 
     await update.message.reply_text(
@@ -281,7 +309,8 @@ async def start_add_match(update: Update):
     if not user or not is_admin(user.id):
         return
 
-    add_match_state[user.id] = {
+    user_states[user.id] = {
+        "action": "add_match",
         "step": "home_team"
     }
 
@@ -296,7 +325,33 @@ async def start_add_match(update: Update):
 
 
 # =========================================================
-# ADD MATCH PROCESS
+# DELETE MATCH
+# =========================================================
+
+async def start_delete_match(update: Update):
+
+    user = update.effective_user
+
+    if not user or not is_admin(user.id):
+        return
+
+    user_states[user.id] = {
+        "action": "delete_match",
+        "step": "match_id"
+    }
+
+    await update.message.reply_text(
+        "🗑 <b>УДАЛЕНИЕ МАТЧА</b>\n\n"
+        "Введите ID матча.\n\n"
+        "Например:\n"
+        "<code>1</code>",
+        parse_mode="HTML",
+        reply_markup=cancel_keyboard()
+    )
+
+
+# =========================================================
+# PROCESS ADD MATCH
 # =========================================================
 
 async def process_add_match(update: Update):
@@ -306,28 +361,117 @@ async def process_add_match(update: Update):
     if not user or not is_admin(user.id):
         return False
 
-    if user.id not in add_match_state:
+    if user.id not in user_states:
         return False
 
-    text = update.message.text.strip()
+    text = (update.message.text or "").strip()
 
     if text == "❌ Отмена":
 
-        add_match_state.pop(user.id, None)
+        user_states.pop(user.id, None)
 
         await update.message.reply_text(
-            "❌ Илова кардани матч бекор шуд.",
+            "❌ Амалиёт бекор шуд.",
             reply_markup=admin_keyboard()
         )
 
         return True
 
-    state = add_match_state[user.id]
+    state = user_states[user.id]
+
+    # =====================================================
+    # DELETE MATCH
+    # =====================================================
+
+    if state["action"] == "delete_match":
+
+        if state["step"] != "match_id":
+            return True
+
+        try:
+
+            match_id = int(text)
+
+        except ValueError:
+
+            await update.message.reply_text(
+                "❌ ID бояд рақам бошад.\n\n"
+                "Мисол: <code>1</code>",
+                parse_mode="HTML",
+                reply_markup=cancel_keyboard()
+            )
+
+            return True
+
+        try:
+
+            existing = (
+                supabase
+                .table("matches")
+                .select("*")
+                .eq("id", match_id)
+                .limit(1)
+                .execute()
+            )
+
+            if not existing.data:
+
+                await update.message.reply_text(
+                    f"❌ Матч бо ID <b>{match_id}</b> ёфт нашуд.",
+                    parse_mode="HTML",
+                    reply_markup=admin_keyboard()
+                )
+
+                user_states.pop(user.id, None)
+
+                return True
+
+            match = existing.data[0]
+
+            home = escape(match.get("home_team"))
+            away = escape(match.get("away_team"))
+
+            supabase \
+                .table("matches") \
+                .delete() \
+                .eq("id", match_id) \
+                .execute()
+
+            user_states.pop(user.id, None)
+
+            await update.message.reply_text(
+                "🗑 <b>МАТЧ УДАЛЁН</b>\n\n"
+                f"🆔 ID: <code>{match_id}</code>\n"
+                f"🏠 {home}\n"
+                f"✈️ {away}",
+                parse_mode="HTML",
+                reply_markup=admin_keyboard()
+            )
+
+        except Exception as e:
+
+            logger.exception("DELETE MATCH ERROR")
+
+            await update.message.reply_text(
+                "❌ Хатогӣ ҳангоми нест кардани матч.\n\n"
+                "Агар дар ин матч пешгӯиҳо бошанд, "
+                "Supabase метавонад удаление-ро манъ кунад.",
+                reply_markup=admin_keyboard()
+            )
+
+            user_states.pop(user.id, None)
+
+        return True
+
+    # =====================================================
+    # ADD MATCH
+    # =====================================================
+
     step = state["step"]
 
-    # ---------------------------------------------
+    # -----------------------------------------------------
     # HOME TEAM
-    # ---------------------------------------------
+    # -----------------------------------------------------
 
     if step == "home_team":
 
@@ -344,9 +488,9 @@ async def process_add_match(update: Update):
 
         return True
 
-    # ---------------------------------------------
+    # -----------------------------------------------------
     # AWAY TEAM
-    # ---------------------------------------------
+    # -----------------------------------------------------
 
     if step == "away_team":
 
@@ -363,15 +507,18 @@ async def process_add_match(update: Update):
 
         return True
 
-    # ---------------------------------------------
+    # -----------------------------------------------------
     # DATE
-    # ---------------------------------------------
+    # -----------------------------------------------------
 
     if step == "date":
 
         try:
 
-            datetime.strptime(text, "%Y-%m-%d")
+            datetime.strptime(
+                text,
+                "%Y-%m-%d"
+            )
 
         except ValueError:
 
@@ -399,15 +546,18 @@ async def process_add_match(update: Update):
 
         return True
 
-    # ---------------------------------------------
+    # -----------------------------------------------------
     # TIME
-    # ---------------------------------------------
+    # -----------------------------------------------------
 
     if step == "time":
 
         try:
 
-            datetime.strptime(text, "%H:%M")
+            datetime.strptime(
+                text,
+                "%H:%M"
+            )
 
         except ValueError:
 
@@ -434,9 +584,9 @@ async def process_add_match(update: Update):
 
         return True
 
-    # ---------------------------------------------
+    # -----------------------------------------------------
     # COMPETITION
-    # ---------------------------------------------
+    # -----------------------------------------------------
 
     if step == "competition":
 
@@ -468,14 +618,19 @@ async def process_add_match(update: Update):
                 .execute()
             )
 
-            match = result.data[0] if result.data else None
+            match = (
+                result.data[0]
+                if result.data
+                else None
+            )
 
-            add_match_state.pop(user.id, None)
+            user_states.pop(user.id, None)
 
             if match:
 
                 await update.message.reply_text(
                     "✅ <b>МАТЧ ИЛОВА ШУД!</b>\n\n"
+                    f"🆔 ID: <code>{match.get('id')}</code>\n"
                     f"🏠 {escape(state['home_team'])}\n"
                     f"✈️ {escape(state['away_team'])}\n\n"
                     f"📅 {state['match_date']}\n"
@@ -489,7 +644,7 @@ async def process_add_match(update: Update):
             else:
 
                 await update.message.reply_text(
-                    "⚠️ Матч илова шуд, аммо маълумот баргардонида нашуд.",
+                    "⚠️ Матч иловашуд, аммо ID баргардонида нашуд.",
                     reply_markup=admin_keyboard()
                 )
 
@@ -497,7 +652,7 @@ async def process_add_match(update: Update):
 
             logger.exception("ADD MATCH ERROR")
 
-            add_match_state.pop(user.id, None)
+            user_states.pop(user.id, None)
 
             await update.message.reply_text(
                 "❌ Ҳангоми илова кардани матч хатогӣ шуд.\n\n"
@@ -572,7 +727,7 @@ async def show_matches(update: Update):
             parse_mode="HTML"
         )
 
-    except Exception as e:
+    except Exception:
 
         logger.exception("SHOW MATCHES ERROR")
 
@@ -587,7 +742,6 @@ async def show_matches(update: Update):
 
 async def get_prediction_details(prediction):
 
-    prediction_id = prediction.get("id")
     user_id = prediction.get("user_id")
     match_id = prediction.get("match_id")
 
@@ -609,7 +763,8 @@ async def get_prediction_details(prediction):
             user_data = user_result.data[0]
 
     except Exception:
-        pass
+
+        logger.exception("GET USER ERROR")
 
     try:
 
@@ -626,7 +781,8 @@ async def get_prediction_details(prediction):
             match_data = match_result.data[0]
 
     except Exception:
-        pass
+
+        logger.exception("GET MATCH ERROR")
 
     return user_data, match_data
 
@@ -670,8 +826,10 @@ async def show_predictions(update: Update):
 
         for prediction in predictions:
 
-            user_data, match_data = await get_prediction_details(
-                prediction
+            user_data, match_data = (
+                await get_prediction_details(
+                    prediction
+                )
             )
 
             prediction_id = prediction.get("id")
@@ -679,13 +837,16 @@ async def show_predictions(update: Update):
             if user_data:
 
                 first_name = escape(
-                    user_data.get("first_name") or "Истифодабаранда"
+                    user_data.get("first_name")
+                    or "Истифодабаранда"
                 )
 
                 username = user_data.get("username")
 
                 if username:
-                    username_text = f"@{escape(username)}"
+                    username_text = (
+                        f"@{escape(username)}"
+                    )
                 else:
                     username_text = "username нест"
 
@@ -696,8 +857,13 @@ async def show_predictions(update: Update):
 
             if match_data:
 
-                home = escape(match_data.get("home_team"))
-                away = escape(match_data.get("away_team"))
+                home = escape(
+                    match_data.get("home_team")
+                )
+
+                away = escape(
+                    match_data.get("away_team")
+                )
 
                 match_text = (
                     f"🏠 {home} — ✈️ {away}"
@@ -707,9 +873,17 @@ async def show_predictions(update: Update):
 
                 match_text = "Матч ёфт нашуд"
 
-            predicted_home = prediction.get("predicted_home")
-            predicted_away = prediction.get("predicted_away")
-            predicted_scorer = prediction.get("predicted_scorer")
+            predicted_home = (
+                prediction.get("predicted_home")
+            )
+
+            predicted_away = (
+                prediction.get("predicted_away")
+            )
+
+            predicted_scorer = (
+                prediction.get("predicted_scorer")
+            )
 
             scorer_text = (
                 escape(predicted_scorer)
@@ -723,20 +897,26 @@ async def show_predictions(update: Update):
                 f"📱 {username_text}\n\n"
                 f"⚽️ {match_text}\n\n"
                 f"🔮 Пешгӯӣ: "
-                f"<b>{predicted_home} : {predicted_away}</b>\n"
+                f"<b>{predicted_home} : "
+                f"{predicted_away}</b>\n"
                 f"🥅 Голзан: {scorer_text}\n\n"
-                f"🆔 Prediction ID: <code>{prediction_id}</code>"
+                f"🆔 Prediction ID: "
+                f"<code>{prediction_id}</code>"
             )
 
             keyboard = InlineKeyboardMarkup([
                 [
                     InlineKeyboardButton(
                         "✅ Дуруст +1",
-                        callback_data=f"correct:{prediction_id}"
+                        callback_data=(
+                            f"correct:{prediction_id}"
+                        )
                     ),
                     InlineKeyboardButton(
                         "❌ Нодуруст 0",
-                        callback_data=f"wrong:{prediction_id}"
+                        callback_data=(
+                            f"wrong:{prediction_id}"
+                        )
                     ),
                 ]
             ])
@@ -747,9 +927,11 @@ async def show_predictions(update: Update):
                 reply_markup=keyboard
             )
 
-    except Exception as e:
+    except Exception:
 
-        logger.exception("SHOW PREDICTIONS ERROR")
+        logger.exception(
+            "SHOW PREDICTIONS ERROR"
+        )
 
         await update.message.reply_text(
             "❌ Хатогӣ ҳангоми гирифтани пешгӯиҳо."
@@ -789,17 +971,26 @@ async def show_users(update: Update):
 
         text = "👥 <b>ИСТИФОДАБАРАНДАГОН</b>\n\n"
 
-        for index, item in enumerate(users, start=1):
+        for index, item in enumerate(
+            users,
+            start=1
+        ):
 
             first_name = escape(
-                item.get("first_name") or "Номаълум"
+                item.get("first_name")
+                or "Номаълум"
             )
 
             username = item.get("username")
 
             if username:
-                username_text = f"@{escape(username)}"
+
+                username_text = (
+                    f"@{escape(username)}"
+                )
+
             else:
+
                 username_text = "—"
 
             points = item.get("points") or 0
@@ -815,7 +1006,7 @@ async def show_users(update: Update):
             parse_mode="HTML"
         )
 
-    except Exception as e:
+    except Exception:
 
         logger.exception("SHOW USERS ERROR")
 
@@ -858,19 +1049,30 @@ async def show_rating(update: Update):
 
         text = "🏆 <b>РЕЙТИНГ</b>\n\n"
 
-        medals = ["🥇", "🥈", "🥉"]
+        medals = [
+            "🥇",
+            "🥈",
+            "🥉"
+        ]
 
-        for index, item in enumerate(users, start=1):
+        for index, item in enumerate(
+            users,
+            start=1
+        ):
 
             first_name = escape(
-                item.get("first_name") or "Номаълум"
+                item.get("first_name")
+                or "Номаълум"
             )
 
             points = item.get("points") or 0
 
             if index <= 3:
+
                 prefix = medals[index - 1]
+
             else:
+
                 prefix = f"{index}."
 
             text += (
@@ -883,7 +1085,7 @@ async def show_rating(update: Update):
             parse_mode="HTML"
         )
 
-    except Exception as e:
+    except Exception:
 
         logger.exception("SHOW RATING ERROR")
 
@@ -904,7 +1106,6 @@ async def award_points(
 
     try:
 
-        # Get prediction
         prediction_result = (
             supabase
             .table("predictions")
@@ -925,7 +1126,6 @@ async def award_points(
 
         prediction = prediction_result.data[0]
 
-        # Already processed
         if prediction.get("points") is not None:
 
             await query.answer(
@@ -939,18 +1139,23 @@ async def award_points(
 
         points = 1 if correct else 0
 
-        # Update prediction
         (
             supabase
             .table("predictions")
             .update({
                 "points": points
             })
-            .eq("id", prediction_id)
+            .eq(
+                "id",
+                prediction_id
+            )
             .execute()
         )
 
-        # Add points only when correct
+        # ---------------------------------------------
+        # ADD POINT TO USER
+        # ---------------------------------------------
+
         if correct:
 
             user_result = (
@@ -965,28 +1170,35 @@ async def award_points(
             if user_result.data:
 
                 current_points = (
-                    user_result.data[0].get("points") or 0
+                    user_result.data[0].get("points")
+                    or 0
                 )
-
-                new_points = current_points + 1
 
                 (
                     supabase
                     .table("users")
                     .update({
-                        "points": new_points
+                        "points": current_points + 1
                     })
-                    .eq("id", user_id)
+                    .eq(
+                        "id",
+                        user_id
+                    )
                     .execute()
                 )
 
-        # Notify player
+        # ---------------------------------------------
+        # NOTIFY PLAYER
+        # ---------------------------------------------
+
         try:
 
             telegram_result = (
                 supabase
                 .table("users")
-                .select("telegram_id, first_name")
+                .select(
+                    "telegram_id, first_name"
+                )
                 .eq("id", user_id)
                 .limit(1)
                 .execute()
@@ -994,8 +1206,10 @@ async def award_points(
 
             if telegram_result.data:
 
-                telegram_id = telegram_result.data[0].get(
-                    "telegram_id"
+                telegram_id = (
+                    telegram_result
+                    .data[0]
+                    .get("telegram_id")
                 )
 
                 if telegram_id:
@@ -1027,10 +1241,15 @@ async def award_points(
                 "PLAYER NOTIFICATION ERROR"
             )
 
-        # Update admin message
+        # ---------------------------------------------
+        # UPDATE ADMIN MESSAGE
+        # ---------------------------------------------
+
         try:
 
-            old_text = query.message.text or ""
+            old_text = (
+                query.message.text or ""
+            )
 
             result_text = (
                 "\n\n"
@@ -1051,9 +1270,11 @@ async def award_points(
             "✅ Хол сабт шуд."
         )
 
-    except Exception as e:
+    except Exception:
 
-        logger.exception("AWARD POINTS ERROR")
+        logger.exception(
+            "AWARD POINTS ERROR"
+        )
 
         await query.answer(
             "❌ Хатогӣ.",
@@ -1062,7 +1283,7 @@ async def award_points(
 
 
 # =========================================================
-# CALLBACKS
+# CALLBACK HANDLER
 # =========================================================
 
 async def callback_handler(
@@ -1149,49 +1370,61 @@ async def text_handler(
     if not user:
         return
 
-    text = (update.message.text or "").strip()
+    text = (
+        update.message.text or ""
+    ).strip()
 
-    # ---------------------------------------------
-    # ADD MATCH STATE
-    # ---------------------------------------------
+    # =====================================================
+    # ACTIVE STATE
+    # =====================================================
 
-    if user.id in add_match_state:
+    if user.id in user_states:
 
         await process_add_match(update)
 
         return
 
-    # ---------------------------------------------
-    # ADMIN ONLY
-    # ---------------------------------------------
+    # =====================================================
+    # ADMIN
+    # =====================================================
 
     if not is_admin(user.id):
-
         return
 
     if text == "➕ Добавить матч":
 
         await start_add_match(update)
+
         return
 
     if text == "📋 Матчи":
 
         await show_matches(update)
+
+        return
+
+    if text == "🗑 Удалить матч":
+
+        await start_delete_match(update)
+
         return
 
     if text == "🎯 Пешгӯиҳои нав":
 
         await show_predictions(update)
+
         return
 
     if text == "👥 Истифодабарандагон":
 
         await show_users(update)
+
         return
 
     if text == "🏆 Рейтинг":
 
         await show_rating(update)
+
         return
 
     if text == "🔄 Навсозӣ":
@@ -1205,17 +1438,43 @@ async def text_handler(
 
         return
 
+
 # =========================================================
 # HANDLERS
 # =========================================================
 
-application.add_handler(CommandHandler("start", start))
-application.add_handler(CommandHandler("myid", myid))
-application.add_handler(CommandHandler("health", health))
-application.add_handler(CommandHandler("admin", admin))
+application.add_handler(
+    CommandHandler(
+        "start",
+        start
+    )
+)
 
 application.add_handler(
-    CallbackQueryHandler(callback_handler)
+    CommandHandler(
+        "myid",
+        myid
+    )
+)
+
+application.add_handler(
+    CommandHandler(
+        "health",
+        health
+    )
+)
+
+application.add_handler(
+    CommandHandler(
+        "admin",
+        admin
+    )
+)
+
+application.add_handler(
+    CallbackQueryHandler(
+        callback_handler
+    )
 )
 
 application.add_handler(
@@ -1224,11 +1483,15 @@ application.add_handler(
         text_handler
     )
 )
+
+
 # =========================================================
 # WEBHOOK
 # =========================================================
 
-async def telegram_webhook(request: Request):
+async def telegram_webhook(
+    request: Request
+):
 
     try:
 
@@ -1239,13 +1502,19 @@ async def telegram_webhook(request: Request):
             application.bot
         )
 
-        await application.process_update(update)
+        await application.process_update(
+            update
+        )
 
-        return PlainTextResponse("OK")
+        return PlainTextResponse(
+            "OK"
+        )
 
-    except Exception as e:
+    except Exception:
 
-        logger.exception("WEBHOOK ERROR")
+        logger.exception(
+            "WEBHOOK ERROR"
+        )
 
         return PlainTextResponse(
             "ERROR",
@@ -1254,10 +1523,12 @@ async def telegram_webhook(request: Request):
 
 
 # =========================================================
-# HEALTH WEB
+# WEB HEALTH
 # =========================================================
 
-async def web_health(request: Request):
+async def web_health(
+    request: Request
+):
 
     return PlainTextResponse(
         "MaydoniSabz bot is running"
@@ -1265,20 +1536,32 @@ async def web_health(request: Request):
 
 
 # =========================================================
-# STARLETTE APP
+# STARLETTE
 # =========================================================
 
 web_app = Starlette(
     routes=[
-        Route("/", web_health, methods=["GET"]),
-        Route("/health", web_health, methods=["GET"]),
-        Route("/telegram", telegram_webhook, methods=["POST"]),
+        Route(
+            "/",
+            web_health,
+            methods=["GET"]
+        ),
+        Route(
+            "/health",
+            web_health,
+            methods=["GET"]
+        ),
+        Route(
+            "/telegram",
+            telegram_webhook,
+            methods=["POST"]
+        ),
     ]
 )
 
 
 # =========================================================
-# MAIN
+# START BOT
 # =========================================================
 
 async def setup_bot():
@@ -1293,16 +1576,29 @@ async def setup_bot():
     await application.start()
 
     logger.info(
-        "Bot started. Webhook: %s",
+        "MaydoniSabz bot started"
+    )
+
+    logger.info(
+        "Webhook: %s",
         WEBHOOK_URL
     )
 
 
+# =========================================================
+# STOP BOT
+# =========================================================
+
 async def shutdown_bot():
 
     await application.stop()
+
     await application.shutdown()
 
+
+# =========================================================
+# MAIN
+# =========================================================
 
 if __name__ == "__main__":
 
@@ -1319,7 +1615,9 @@ if __name__ == "__main__":
             log_level="info"
         )
 
-        server = uvicorn.Server(config)
+        server = uvicorn.Server(
+            config
+        )
 
         try:
 
